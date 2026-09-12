@@ -60,6 +60,14 @@ HAND_MEMORY_FRAMES = 6
 # Ignore tiny landmark jitter when building the trajectory.
 MIN_MOVEMENT = 2.0
 
+# AI detection tuning. These do NOT change the trained model.
+# The model still receives exactly the same 40-point feature format
+# that was used during training.
+MIN_TRAJECTORY_PATH = 35.0
+HANDSHAKE_CONFIRMATIONS = 2
+NO_HANDSHAKE_CONFIRMATIONS = 3
+PREDICTION_HISTORY_SIZE = 3
+
 
 # ============================================================
 # COLORS
@@ -670,6 +678,12 @@ class HandshakeApp(QMainWindow):
         self.score = 0
         self.hand_count = 0
 
+        # Keep a very small history of AI decisions. This prevents one
+        # unstable frame from immediately declaring a handshake.
+        self.prediction_history = deque(maxlen=PREDICTION_HISTORY_SIZE)
+        self.last_ai_prediction = "WAITING"
+        self.last_ai_confidence = 0.0
+
         # Short-term MediaPipe hand memory.
         self.previous_hands = []
         self.missing_frames = 0
@@ -956,7 +970,13 @@ class HandshakeApp(QMainWindow):
         # --------------------------------------------------------
         current_point = None
 
-        if len(current_hands) >= 2:
+        # IMPORTANT:
+        # The handshake AI is allowed to build a trajectory ONLY
+        # when MediaPipe currently sees TWO hands.
+        #
+        # This prevents one visible hand from being classified as
+        # a handshake by the trained model.
+        if raw_hand_count >= 2 and len(current_hands) >= 2:
 
             p1 = current_hands[0]
             p2 = current_hands[1]
@@ -987,10 +1007,6 @@ class HandshakeApp(QMainWindow):
             )
 
             current_point = midpoint
-
-        elif len(current_hands) == 1:
-
-            current_point = current_hands[0]
 
         # --------------------------------------------------------
         # TRAJECTORY
@@ -1036,10 +1052,25 @@ class HandshakeApp(QMainWindow):
         # --------------------------------------------------------
         self.frame_count += 1
 
-        if (
+        # The trained AI was built for a 40-point trajectory. We therefore
+        # never ask it to classify a shorter sequence.
+        #
+        # IMPORTANT: the AI is only fed a trajectory when TWO hands are
+        # currently detected. A single hand can therefore never trigger
+        # HANDSHAKE.
+        if raw_hand_count < 2:
+
+            self.trajectory.clear()
+            self.prediction_history.clear()
+            self.prediction = "WAITING"
+            self.confidence = 0.0
+            self.score = 0
+            self.last_ai_prediction = "WAITING"
+            self.last_ai_confidence = 0.0
+
+        elif (
             len(self.trajectory) >= POINTS
-            and
-            self.frame_count % PREDICTION_INTERVAL == 0
+            and self.frame_count % PREDICTION_INTERVAL == 0
         ):
 
             sequence = np.array(
@@ -1047,137 +1078,149 @@ class HandshakeApp(QMainWindow):
                 dtype=np.float32
             )
 
-            try:
+            # Motion gate: do not classify a stationary pair of hands.
+            # This is only a safety gate before the trained AI; it does not
+            # replace the AI model.
+            diffs = np.diff(sequence, axis=0)
+            path_length_pixels = float(
+                np.sum(np.linalg.norm(diffs, axis=1))
+            )
 
-                # IMPORTANT:
-                # This is intentionally identical to the feature
-                # extraction used to train handshake_detector.pkl.
-                features = extract_features(
-                    sequence
-                )
+            if path_length_pixels >= MIN_TRAJECTORY_PATH:
 
-                prediction = model.predict(
-                    [features]
-                )[0]
+                try:
 
-                probabilities = model.predict_proba(
-                    [features]
-                )[0]
+                    # EXACTLY the same feature extraction used by the
+                    # training program.
+                    features = extract_features(sequence)
 
-                self.prediction = str(
-                    prediction
-                )
+                    prediction = model.predict(
+                        [features]
+                    )[0]
 
-                self.confidence = float(
-                    np.max(probabilities)
-                )
+                    probabilities = model.predict_proba(
+                        [features]
+                    )[0]
 
-                prediction_upper = (
-                    self.prediction.upper()
-                )
+                    raw_prediction = str(prediction).upper()
+                    raw_confidence = float(np.max(probabilities))
 
-                # ------------------------------------------------
-                # SCORE
-                # ------------------------------------------------
-                # The supplied model is HANDSHAKE / NO_HANDSHAKE.
-                # Use the actual HANDSHAKE probability for the score.
-                if prediction_upper == "HANDSHAKE":
+                    self.last_ai_prediction = raw_prediction
+                    self.last_ai_confidence = raw_confidence
 
-                    classes = getattr(
-                        model,
-                        "classes_",
-                        []
+                    # Store the AI result, then require short-term
+                    # agreement before changing the visible result.
+                    self.prediction_history.append(raw_prediction)
+
+                    handshake_votes = sum(
+                        1
+                        for item in self.prediction_history
+                        if item == "HANDSHAKE"
                     )
 
+                    no_handshake_votes = sum(
+                        1
+                        for item in self.prediction_history
+                        if item == "NO_HANDSHAKE"
+                    )
+
+                    if handshake_votes >= HANDSHAKE_CONFIRMATIONS:
+                        self.prediction = "HANDSHAKE"
+                        self.confidence = raw_confidence
+
+                    elif no_handshake_votes >= NO_HANDSHAKE_CONFIRMATIONS:
+                        self.prediction = "NO_HANDSHAKE"
+                        self.confidence = raw_confidence
+
+                    else:
+                        # Keep the current decision while the AI gathers
+                        # enough consecutive evidence.
+                        if self.prediction not in (
+                            "HANDSHAKE",
+                            "NO_HANDSHAKE"
+                        ):
+                            self.prediction = "WAITING"
+                            self.confidence = raw_confidence
+
+                    prediction_upper = self.prediction.upper()
+
+                    # ----------------------------------------------------
+                    # SCORE
+                    # ----------------------------------------------------
+                    # Score is based on the trained model's actual
+                    # HANDSHAKE probability.
+                    classes = getattr(model, "classes_", [])
                     handshake_probability = 0.0
 
                     for index, class_value in enumerate(classes):
-
-                        if (
-                            str(class_value).upper()
-                            == "HANDSHAKE"
-                        ):
-
+                        if str(class_value).upper() == "HANDSHAKE":
                             handshake_probability = float(
                                 probabilities[index]
                             )
-
                             break
 
-                    self.score = int(
-                        max(
-                            0,
-                            min(
-                                100,
-                                round(
-                                    handshake_probability * 100
+                    if prediction_upper == "HANDSHAKE":
+                        self.score = int(
+                            max(
+                                0,
+                                min(
+                                    100,
+                                    round(handshake_probability * 100)
                                 )
                             )
                         )
-                    )
 
-                elif prediction_upper == "NO_HANDSHAKE":
+                    elif prediction_upper == "NO_HANDSHAKE":
+                        self.score = 0
 
-                    # A detected NO_HANDSHAKE is zero score.
-                    self.score = 0
+                    elif prediction_upper in (
+                        "POOR",
+                        "AVERAGE",
+                        "GOOD",
+                        "EXCELLENT",
+                    ):
+                        # Compatibility with a future four-class model.
+                        class_scores = {
+                            "POOR": 25,
+                            "AVERAGE": 50,
+                            "GOOD": 75,
+                            "EXCELLENT": 95,
+                        }
 
-                elif prediction_upper in (
-                    "POOR",
-                    "AVERAGE",
-                    "GOOD",
-                    "EXCELLENT",
-                ):
+                        weighted_score = 0.0
 
-                    # Compatibility with a future four-class model.
-                    class_scores = {
-                        "POOR": 25,
-                        "AVERAGE": 50,
-                        "GOOD": 75,
-                        "EXCELLENT": 95,
-                    }
+                        for class_name, class_score in class_scores.items():
+                            for index, class_value in enumerate(classes):
+                                if str(class_value).upper() == class_name:
+                                    weighted_score += (
+                                        float(probabilities[index])
+                                        * class_score
+                                    )
 
-                    classes = getattr(
-                        model,
-                        "classes_",
-                        []
-                    )
-
-                    weighted_score = 0.0
-
-                    for class_name, class_score in class_scores.items():
-
-                        for index, class_value in enumerate(classes):
-
-                            if (
-                                str(class_value).upper()
-                                == class_name
-                            ):
-
-                                weighted_score += (
-                                    float(probabilities[index])
-                                    * class_score
+                        self.score = int(
+                            max(
+                                0,
+                                min(
+                                    100,
+                                    round(weighted_score)
                                 )
-
-                    self.score = int(
-                        max(
-                            0,
-                            min(
-                                100,
-                                round(weighted_score)
                             )
                         )
-                    )
 
-                else:
+                    else:
+                        self.score = 0
 
+                except Exception as error:
+                    print("Prediction error:", error)
+
+            else:
+                # Two hands are visible, but there is not enough movement
+                # yet to call the trained AI.
+                if self.prediction != "HANDSHAKE":
+                    self.prediction = "WAITING"
+                    self.confidence = 0.0
                     self.score = 0
-
-            except Exception as error:
-
-                print(
-                    "Prediction error:",
-                    error
-                )
+                    self.prediction_history.clear()
 
         # --------------------------------------------------------
         # STATUS
