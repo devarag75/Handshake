@@ -131,10 +131,13 @@ Random Forest AI
        ↓
 HANDSHAKE / NO_HANDSHAKE
 Project Demo
+
 Screenshots
+https://drive.google.com/file/d/1pMbUBJGzhxAZFR3L5cX9ssFDau8hvRjR/view?usp=drivesdk
+https://drive.google.com/file/d/1tfgemMgdcSNDey_UfVWDw5yaFyhif17O/view?usp=drivesdk
+https://drive.google.com/file/d/1ynKIh6RUJpD5NNu250RNUbUQVVtKGxJt/view?usp=drivesdk
 
 Video
-
-https://drive.google.com/file/d/1Mi8NFgcSteP66sMh8qKXMuKNaMNNRIZN/view?usp=drivesdk
+https://drive.google.com/file/d/11GV1xqfZwfLYSX1w7EQz4DG37bueNmkI/view?usp=drivesdk
 
 The demo shows two people performing a handshake while the AI tracks their hands and determines whether the movement represents a handshake.
