@@ -28,7 +28,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QLabel
 
 BASE_DIR = Path(__file__).resolve().parent
 
-CAMERA_URL = "http://10.199.101.175:8080/video"
+CAMERA_URL = "http://192.168.1.33:8080/video"
 MODEL_FILE = BASE_DIR / "handshake_detector.pkl"
 BACKGROUND_FILE = BASE_DIR / "handshake_reference_bg.png"
 
